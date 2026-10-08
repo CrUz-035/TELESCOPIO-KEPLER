@@ -3,7 +3,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QLineEdit, QCompleter, QListWidget, QComboBox, QPushButton, QTextEdit, QSplitter,
-    QAbstractItemView
+    QAbstractItemView, QCheckBox
 )
 
 from analisys import search_star, get_stardata
@@ -36,41 +36,70 @@ class MainWindow(QMainWindow):
         label_star.setStyleSheet("font-weight: bold;")
         left_layout.addWidget(label_star)
 
+        search_layout = QHBoxLayout()
+
         self.star_input = QLineEdit()
-        left_layout.addWidget(self.star_input)
+        search_layout.addWidget(self.star_input)
+
+        # Mission Checkboxes
+        self.chk_kepler = QCheckBox("Kepler/K2")
+        self.chk_kepler.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_kepler.setChecked(True)
+        search_layout.addWidget(self.chk_kepler)
+
+        self.chk_tess = QCheckBox("TESS")
+        self.chk_tess.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.chk_tess.setChecked(True)
+        search_layout.addWidget(self.chk_tess)
 
         self.search_btn = QPushButton("Search")
+        self.search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.search_btn.setStyleSheet("background-color: #2b5b84; color: white; font-weight: bold; padding: 6px;")
         self.search_btn.clicked.connect(self.exceute_search)
-        left_layout.addWidget(self.search_btn)
+        search_layout.addWidget(self.search_btn)
 
+        left_layout.addLayout(search_layout)
+
+
+        #List of records founded
         label_list = QLabel("Records found:")
         label_list.setStyleSheet("font-weight: bold;")
         left_layout.addWidget(label_list)
 
         self.results_list = QListWidget()
         self.results_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        left_layout.addWidget(self.results_list)
+        left_layout.addWidget(self.results_list, stretch=1)
+
+        self.results_list.itemSelectionChanged.connect(self.update_download_btn)
 
 
-
+        #Logs box
         self.logs_text = QTextEdit()
         self.logs_text.setPlaceholderText("")
         self.logs_text.setMaximumHeight(150)
+        line_height = self.logs_text.fontMetrics().lineSpacing()
+        self.logs_text.setFixedHeight(line_height*3 + 12)
+        self.logs_text.setReadOnly(True)
         left_layout.addWidget(self.logs_text)
 
-        #Placeholders
-
-        left_layout.addWidget(QLabel("<b>Graphis Settings:</b>"))
-        self.config_btn_placeholder = QPushButton("Transit Parameters")
-        left_layout.addWidget(self.config_btn_placeholder)
-
-        left_layout.addStretch()
-
         #Execute Analisys
-        self.analyze_btn = QPushButton("Excecute Analisys")
-        self.analyze_btn.setStyleSheet("background-color: #2b5b84; color: white; font-weight: bold; padding: 8px;")
-        left_layout.addWidget(self.analyze_btn)
+        self.download_btn = QPushButton("Download data")
+        self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.download_btn.setEnabled(False)
+        self.download_btn.clicked.connect(self.excecute_download)
+        self.download_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b5b84; 
+                color: white; 
+                font-weight: bold; 
+                padding: 8px;
+            }
+            QPushButton:disabled {
+                background-color: #d3d3d3; 
+                color: #7f7f7f;
+            }
+        """)
+        left_layout.addWidget(self.download_btn)
         #-----------------------------------------
 
         #-----------------------------------------
@@ -120,6 +149,8 @@ class MainWindow(QMainWindow):
             self.logs_text.append("Invalid input.")
             return
 
+        self.download_btn.setEnabled(False)
+
         self.logs_text.append(f"Searching...")
         QApplication.processEvents()
 
@@ -136,8 +167,22 @@ class MainWindow(QMainWindow):
 
             self.logs_text.append(f"{len(self.current_search_result)} records found.")
 
+            self.update_download_btn()
         except Exception as e:
-            self.logs_text.append("Search error.")
+            self.logs_text.append(f"Search error: {str(e)}")
+            self.download_btn.setEnabled(False)
+
+    def excecute_download(self):
+        return
+
+    def update_download_btn(self):
+        theres_results = len(self.results_list) > 0
+        is_selected = len(self.results_list.selectedIndexes()) > 0
+
+        print(theres_results and is_selected)
+
+        self.download_btn.setEnabled(theres_results and is_selected)
+    
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
