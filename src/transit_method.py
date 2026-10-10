@@ -1,5 +1,5 @@
 import warnings
-
+import astropy.units as u
 import lightkurve as lk
 import numpy as np
 import pandas as pd
@@ -22,7 +22,6 @@ def _val(x):
     """Convierte un Quantity/escalar de astropy a float simple."""
     return float(getattr(x, "value", x))
 
-
 # ---------------------------------------------------------------------------
 # 1. DESCARGA Y LIMPIEZA
 # ---------------------------------------------------------------------------
@@ -42,7 +41,6 @@ def download_light_curve(star_name, mission, max_obs=None):
     if max_obs:
         search = search[:max_obs]
     return search.download_all(flux_column="pdcsap_flux").stitch()
-
 
 def clip_upper_outliers(light_curve, sigma_upper=4.0):
     """
@@ -67,7 +65,7 @@ def flatten_light_curve(light_curve, max_duration, mask=None):
 
 def bin_light_curve(light_curve, minutes):
     """Promedia en bins de tiempo (reduce ruido y acelera BLS)."""
-    binned = light_curve.bin(time_bin_size=minutes * u.min).remove_nans()
+    binned = light_curve.bin(time_bin_size=minutes  * u.min).remove_nans()
     ok = np.isfinite(_arr(binned.flux)) & np.isfinite(_arr(binned.flux_err))
     return binned[ok]
 
@@ -195,11 +193,13 @@ def bin_average(x, y, width, min_points=3):
 # 4. FUNCIÓN PRINCIPAL
 # ---------------------------------------------------------------------------
 def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
-                    bin_minutes=None, max_period=None):
+                    bin_minutes=None, max_period=None, callback=None):
     """
     Descarga y analiza cualquier estrella de Kepler o TESS.
     Devuelve (results_df, plot_data); ver la descripción al inicio del archivo.
     """
+    if callback:
+        callback("Argument validation...")
     # Validación de argumentos
     if not star_name or not str(star_name).strip():
         raise ValueError("star_name no puede estar vacío")
@@ -208,6 +208,8 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     if stellar_radius is not None and stellar_radius <= 0:
         raise ValueError("stellar_radius debe ser positivo (radios solares)")
 
+    if callback:
+        callback("Searching and downloading...")
     # 1. Descarga (si mission=None prueba Kepler y luego TESS)
     raw_lc, used_mission = None, None
     for candidate in ([mission] if mission else ["Kepler", "TESS"]):
@@ -221,6 +223,8 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
         raise RuntimeError(f"No hay datos de {mission or 'Kepler ni TESS'} "
                            f"para '{star_name}'.")
 
+    if callback:
+        callback("Cleaning...")
     # 2. Limpieza y parámetros de la búsqueda
     clean_lc = raw_lc.remove_nans().normalize()
     total_time = _val(clean_lc.time.max()) - _val(clean_lc.time.min())
@@ -230,12 +234,16 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     min_duration = bin_minutes / 1440
     max_duration = float(get_bls_ranges(total_time, max_period, min_duration)[2].max())
 
+    if callback:
+        callback("First step: searching for transits...")
     # 3. Pasada 1: localizar los tránsitos (aplanado sin máscara) 
     flat_lc = clip_upper_outliers(flatten_light_curve(clean_lc, max_duration))
     binned_lc = bin_light_curve(flat_lc, bin_minutes)
     preliminary = extract_bls_parameters(
         run_bls(binned_lc, max_period, min_duration, max_points=40000))
-
+    
+    if callback:
+        callback("Second step: flatten, global BLS and refining...")
     # 4. Pasada 2: aplanar protegiendo los tránsitos, BLS global + refinado 
     mask = clean_lc.create_transit_mask(period=preliminary["period"],
                                         transit_time=preliminary["t0"],
@@ -248,6 +256,8 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     if fine["power"] >= 0.9 * params["power"]:
         params = fine
 
+    if callback:
+        callback("Folding, depth and radius...")
     # 5. Plegado, profundidad y radio
     folded = flat_lc.fold(period=params["period"], epoch_time=params["t0"])
     folded_depth, folded_err = depth_from_folded(folded, params["duration_h"] / 24)
@@ -258,7 +268,9 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     odd_even = (params["odd_depth"] / params["even_depth"]
                 if np.isfinite(params["even_depth"]) and params["even_depth"] > 0
                 else np.nan)
-
+    
+    if callback:
+        callback("Exporting results...")
     # 6. TABLA de resultados
     results_df = pd.DataFrame([{
         "star": star_name,
@@ -309,4 +321,6 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
         "t0": params["t0"], "duration_h": params["duration_h"],
         "depth_ppm": params["depth_bls"] * 1e6,
     }
+    if callback:
+        callback("Success")
     return results_df, plot_data

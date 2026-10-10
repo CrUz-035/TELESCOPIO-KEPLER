@@ -2,9 +2,11 @@ import numpy as np
 import pandas as pd
 import lightkurve as lk
 
-def search_star(target):
-
-    search_result = lk.search_lightcurve(target)
+def search_star(target, mission_filter=None):
+    if mission_filter:
+        search_result = lk.search_lightcurve(target, mission=mission_filter)
+    else:
+        search_result = lk.search_lightcurve(target)
 
     return search_result
 
@@ -21,4 +23,5 @@ def get_stardata(target):
     author = search_result.author
 
     return lc, mission, author
+
     

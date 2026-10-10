@@ -1,12 +1,17 @@
 import sys
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QLineEdit, QCompleter, QListWidget, QComboBox, QPushButton, QTextEdit, QSplitter,
-    QAbstractItemView, QCheckBox
+    QAbstractItemView, QCheckBox, QTableWidget, QTableWidgetItem, QButtonGroup
 )
 
 from analisys import search_star, get_stardata
+from transit_method import analyze_transit
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -41,37 +46,33 @@ class MainWindow(QMainWindow):
         self.star_input = QLineEdit()
         search_layout.addWidget(self.star_input)
 
-        # Mission Checkboxes
-        self.chk_kepler = QCheckBox("Kepler/K2")
-        self.chk_kepler.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_kepler.setChecked(True)
-        search_layout.addWidget(self.chk_kepler)
-
-        self.chk_tess = QCheckBox("TESS")
-        self.chk_tess.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.chk_tess.setChecked(True)
-        search_layout.addWidget(self.chk_tess)
-
         self.search_btn = QPushButton("Search")
         self.search_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.search_btn.setStyleSheet("background-color: #2b5b84; color: white; font-weight: bold; padding: 6px;")
-        self.search_btn.clicked.connect(self.exceute_search)
+        self.search_btn.clicked.connect(self.exceute_analisys)
+        self.search_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2b5b84; 
+                color: white; 
+                font-weight: bold; 
+                padding: 6px;
+            }
+            QPushButton:disabled {
+                background-color: #d3d3d3; 
+                color: #7f7f7f;
+            }
+        """)
         search_layout.addWidget(self.search_btn)
 
         left_layout.addLayout(search_layout)
 
+        label_tabla = QLabel("Analisys results:")
+        label_tabla.setStyleSheet("font-weight: bold;")
+        left_layout.addWidget(label_tabla)
 
-        #List of records founded
-        label_list = QLabel("Records found:")
-        label_list.setStyleSheet("font-weight: bold;")
-        left_layout.addWidget(label_list)
-
-        self.results_list = QListWidget()
-        self.results_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        left_layout.addWidget(self.results_list, stretch=1)
-
-        self.results_list.itemSelectionChanged.connect(self.update_download_btn)
-
+        self.results_display = QTextEdit()
+        self.results_display.setReadOnly(True) 
+        
+        left_layout.addWidget(self.results_display, stretch=1) 
 
         #Logs box
         self.logs_text = QTextEdit()
@@ -81,25 +82,6 @@ class MainWindow(QMainWindow):
         self.logs_text.setFixedHeight(line_height*3 + 12)
         self.logs_text.setReadOnly(True)
         left_layout.addWidget(self.logs_text)
-
-        #Execute Analisys
-        self.download_btn = QPushButton("Download data")
-        self.download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.download_btn.setEnabled(False)
-        self.download_btn.clicked.connect(self.excecute_download)
-        self.download_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2b5b84; 
-                color: white; 
-                font-weight: bold; 
-                padding: 8px;
-            }
-            QPushButton:disabled {
-                background-color: #d3d3d3; 
-                color: #7f7f7f;
-            }
-        """)
-        left_layout.addWidget(self.download_btn)
         #-----------------------------------------
 
         #-----------------------------------------
@@ -107,25 +89,54 @@ class MainWindow(QMainWindow):
         right_container = QWidget()
         right_layout = QVBoxLayout(right_container) 
 
-        #Graphic (Add function)
+        #Graphics
         label_graphic = QLabel("Light Curve Graphic")
         label_graphic.setStyleSheet("font-weight: bold;")
         right_layout.addWidget(label_graphic)
-        #Placeholders
-        self.plot_placeholder = QLabel("Garphic")
-        self.plot_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.plot_placeholder.setStyleSheet("background-color: #1e1e1e; color: #aaaaaa; border: 1px solid #444; border-radius: 4px;")
-        self.plot_placeholder.setMinimumHeight(350)
-        right_layout.addWidget(self.plot_placeholder)
 
-        #Analisys Results
-        label_results = QLabel("Results:")
-        label_results.setStyleSheet("font-weight: bold;")
-        right_layout.addWidget(label_results)
-        self.results_text = QTextEdit()
-        self.results_text.setPlaceholderText("Numeric and graphic analisis here")
-        self.results_text.setMaximumHeight(150)
-        right_layout.addWidget(self.results_text)
+        graph_btns_layout = QHBoxLayout()
+        
+        self.graph0_btn = QPushButton("Raw Lightcurve")
+        self.graph1_btn = QPushButton("Lightcurve")
+        self.graph2_btn = QPushButton("Periodogram BLS")
+        self.graph3_btn = QPushButton("Zoom")
+
+        self.graph_btns = [
+            self.graph0_btn, self.graph1_btn, self.graph2_btn, self.graph3_btn
+        ]
+
+        self.graph_btn_group = QButtonGroup(self)
+        self.graph_btn_group.setExclusive(True)
+
+        for i, btn in enumerate(self.graph_btns, start=1):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #e0e0e0; 
+                    color: #333333; 
+                    font-weight: bold; 
+                    padding: 5px;
+                    border-radius: 4px;
+                }
+                QPushButton:checked {
+                    background-color: #2b5b84; 
+                    color: white;
+                }
+            """)
+
+            self.graph_btn_group.addButton(btn, i)
+            graph_btns_layout.addWidget(btn)
+
+        right_layout.addLayout(graph_btns_layout)
+
+        self.graph_btn_group.idClicked.connect(self.select_graphics)
+
+        self.graph0_btn.setChecked(True)
+
+        self.figura = Figure(figsize=(6, 4), dpi=100)
+        self.canvas = FigureCanvas(self.figura)
+        right_layout.addWidget(self.canvas, stretch=1)
 
         #Export Analisys
         self.export_btn = QPushButton("Export")
@@ -136,52 +147,163 @@ class MainWindow(QMainWindow):
         splitter.addWidget(left_container)
         splitter.addWidget(right_container)
         
-        # Proporción inicial de la división (Izquierda 35%, Derecha 65%)
         splitter.setSizes([420, 780])
 
 
-        self.current_search_result = None
+        self.current_df = None
+        self.current_plot_dict = None
 
 
-    def exceute_search(self):
+    def exceute_analisys(self):
         target = self.star_input.text().strip()
         if not target:
+            self.logs_text.clear()
             self.logs_text.append("Invalid input.")
             return
 
-        self.download_btn.setEnabled(False)
+        self.search_btn.setEnabled(False)
+        self.logs_text.clear()
 
-        self.logs_text.append(f"Searching...")
+        def get_callback(message):
+            self.logs_text.append(message)
+            QApplication.processEvents()
+
         QApplication.processEvents()
 
         try:
-            self.current_search_result = search_star(target)
-            self.results_list.clear()
-            if(self.current_search_result) == 0:
-                self.logs_text.append(f"No results for '{target}'.")
-                return
+            results, plot_data = analyze_transit(target, callback=get_callback) 
 
-            for i, row in enumerate(self.current_search_result):
-                item_text = f"[{i}] Mission: {row.mission} | Year: {row.year} | Author: {row.author} | Exptime: {row.exptime}s"
-                self.results_list.addItem(item_text)
+            self.current_df = results
+            self.current_plot_dict = plot_data
 
-            self.logs_text.append(f"{len(self.current_search_result)} records found.")
-
-            self.update_download_btn()
+            self.load_analisys_results(results)
+            self.select_graphics(1)
+            self.search_btn.setEnabled(True)
         except Exception as e:
             self.logs_text.append(f"Search error: {str(e)}")
-            self.download_btn.setEnabled(False)
+            self.search_btn.setEnabled(True)
 
-    def excecute_download(self):
-        return
+    def load_analisys_results(self, df: pd.DataFrame):
+        self.results_display.clear()
 
-    def update_download_btn(self):
-        theres_results = len(self.results_list) > 0
-        is_selected = len(self.results_list.selectedIndexes()) > 0
+        if df is None or df.empty:
+            self.results_display.setPlainText("No data")
+            return
 
-        print(theres_results and is_selected)
+        row = df.iloc[0]
+        text_lines = []
 
-        self.download_btn.setEnabled(theres_results and is_selected)
+        for col_name in df.columns:
+            value = row[col_name]
+            
+            if isinstance(value, float):
+                value_str = f"{value:.5f}"
+            else:
+                value_str = str(value)
+
+            text_lines.append(f"• {col_name}: {value_str}")
+
+        text_final = "\n".join(text_lines)
+        self.results_display.setPlainText(text_final)
+
+    def select_graphics(self, numero):
+            for i, btn in enumerate(self.graph_btns, start=1):
+                btn.setChecked(i == numero)
+    
+            if not self.current_plot_dict:
+                return
+    
+            self.figura.clear()
+            ax = self.figura.add_subplot(111)
+    
+            if numero == 1:
+                self.show_raw_lightcurve(ax, self.current_plot_dict)
+            elif numero == 2:
+                self.show_lightcurve(ax, self.current_plot_dict)
+            elif numero == 3:
+                self.show_periodograma_BLS(ax, self.current_plot_dict)
+            elif numero == 4:
+                self.show_zoom(ax, self.current_plot_dict)
+    
+            self.canvas.draw()
+
+    def show_raw_lightcurve(self, ax, data):
+        t = data["time_raw"]
+        f = data["flux_raw"]
+
+        ax.plot(t, f, 'k.', markersize=2, alpha=0.6)
+        ax.set_title("Lightcurve Raw", fontsize=10, fontweight='bold')
+        ax.set_xlabel("Time", fontsize=9)
+        ax.set_ylabel("Flux", fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+
+        self.canvas.draw()
+
+    def show_lightcurve(self, ax, data):
+        t_clean = data.get("time_clean", [])
+        f_clean = data.get("flux_clean", [])
+        t_binned = data.get("time_binned", [])
+        f_binned = data.get("flux_binned", [])
+        transit_times = data.get("transit_times", [])
+
+        ax.plot(t_clean, f_clean, '.', color='gray', markersize=2, alpha=0.5, label='Clean')
+
+        if len(t_binned) > 0 and len(f_binned) > 0:
+            ax.plot(t_binned, f_binned, '.', color='blue', markersize=4, label='Binned')
+
+
+        ax.set_title("Lightcurve", fontsize=10, fontweight='bold')
+        ax.set_xlabel("Time (Days)", fontsize=9)
+        ax.set_ylabel("Normalized Flux", fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='upper right', fontsize=8)
+
+        self.canvas.draw()
+
+    def show_periodograma_BLS(self, ax, data):
+        periods = data.get("periods", [])
+        power = data.get("power", [])
+        best_period = data.get("best_period", None)
+        best_power = data.get("best_power", None)
+
+        ax.plot(periods, power, color='black', linewidth=1)
+
+        if best_period is not None and best_power is not None:
+            ax.axvline(x=best_period, color='red', linestyle=':', label=f"Best Period: {best_period:.4f} d")
+            ax.plot(best_period, best_power, 'ro', markersize=6)
+
+    def show_zoom(self, ax, data):
+        phase_h = data.get("phase_hours", [])
+        folded_f = data.get("folded_flux", [])
+        binned_phase_h = data.get("binned_phase_hours", [])
+        binned_folded_f = data.get("binned_folded_flux", [])
+        binned_folded_err = data.get("binned_folded_err", None)
+        duration_h = data.get("duration_h", 0)
+        window_h = data.get("window_h", 0)
+        depth_ppm = data.get("depth_ppm", 0)
+
+        ax.plot(phase_h, folded_f, '.', color='gray', markersize=2, alpha=0.4)
+
+        if len(binned_phase_h) > 0 and len(binned_folded_f) > 0:
+            if binned_folded_err is not None:
+                ax.errorbar(binned_phase_h, binned_folded_f, yerr=binned_folded_err, 
+                            fmt='ro', markersize=4, capsize=2, label='Binned mean')
+            else:
+                ax.plot(binned_phase_h, binned_folded_f, 'ro', markersize=4, label='Binned mean')
+
+        if duration_h > 0:
+            ax.axvspan(-duration_h / 2, duration_h / 2, color='orange', alpha=0.2, label='Transit duration')
+
+        if window_h > 0:
+            ax.set_xlim(-window_h, window_h)
+
+        titulo = f"Folded Transit (Depth ~ {depth_ppm:.0f} ppm)"
+        ax.set_title(titulo, fontsize=10, fontweight='bold')
+        
+        ax.set_xlabel("Transit hours from center", fontsize=9)
+        ax.set_ylabel("Normalized Flux", fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='lower right', fontsize=8)
     
 
 if __name__ == "__main__":
