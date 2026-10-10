@@ -1,8 +1,10 @@
+import re
 import warnings
 import astropy.units as u
 import lightkurve as lk
 import numpy as np
 import pandas as pd
+from astroquery.mast import Catalogs
 
 
 # Silencia avisos informativos de lightkurve para no ensuciar la consola
@@ -17,14 +19,12 @@ def _arr(x):
     """Convierte Quantity / arreglo enmascarado a ndarray de floats."""
     return np.asarray(getattr(x, "value", x), dtype=float)
 
-
 def _val(x):
     """Convierte un Quantity/escalar de astropy a float simple."""
     return float(getattr(x, "value", x))
 
 # ---------------------------------------------------------------------------
 # 1. DESCARGA Y LIMPIEZA
-# ---------------------------------------------------------------------------
 def download_light_curve(star_name, mission, max_obs=None):
     """
     Descarga TODOS los trimestres/sectores de la misión y los une (stitch).
@@ -58,7 +58,7 @@ def flatten_light_curve(light_curve, max_duration, mask=None):
     """
     dt = np.nanmedian(np.diff(_arr(light_curve.time.value)))
     window = int(max(0.5, 3 * max_duration) / dt)
-    window = window if window % 2 == 1 else window + 1     # debe ser impar
+    window = window if window % 2 == 1 else window + 1      # debe ser impar
     return light_curve.flatten(window_length=window, polyorder=2,
                                break_tolerance=10, mask=mask)
 
@@ -69,10 +69,7 @@ def bin_light_curve(light_curve, minutes):
     ok = np.isfinite(_arr(binned.flux)) & np.isfinite(_arr(binned.flux_err))
     return binned[ok]
 
-
-# ---------------------------------------------------------------------------
 # 2. BOX LEAST SQUARES
-# ---------------------------------------------------------------------------
 def get_bls_ranges(total_time, max_period_user=None, min_duration=0.0):
     """
     Rango de períodos y duraciones (en días) según la cobertura temporal.
@@ -121,10 +118,10 @@ def refine_bls(light_curve, params, width=0.01, n_points=4000):
 def extract_bls_parameters(bls):
     """Extrae período, t0, duración, profundidad, SNR y prueba impar/par del pico BLS."""
     params = {
-        "period": _val(bls.period_at_max_power),               # días
-        "t0": _val(bls.transit_time_at_max_power),             # BKJD / BTJD
+        "period": _val(bls.period_at_max_power),                     # días
+        "t0": _val(bls.transit_time_at_max_power),                   # BKJD / BTJD
         "duration_h": _val(bls.duration_at_max_power) * 24,    # horas
-        "depth_bls": _val(bls.depth_at_max_power),             # fracción de flujo
+        "depth_bls": _val(bls.depth_at_max_power),                   # fracción de flujo
         "snr": float(_arr(bls.snr)[np.nanargmax(_arr(bls.power))]),
         "power": _val(bls.max_power),
         "odd_depth": np.nan, "even_depth": np.nan, "n_transits": np.nan,
@@ -141,10 +138,41 @@ def extract_bls_parameters(bls):
         pass
     return params
 
-
-# ---------------------------------------------------------------------------
 # 3. PROFUNDIDAD, RADIO Y UTILIDADES DE GRÁFICAS
-# ---------------------------------------------------------------------------
+def get_stellar_radius(star_name, search_radius_deg=0.01):
+    """
+    Busca el radio de la estrella (en radios solares) en el catálogo TIC de MAST.
+    El TIC también incluye las estrellas del campo de Kepler, así que sirve
+    para las dos misiones.
+
+    star_name puede ser un nombre ("Kepler-10", "WASP-18") o un ID ("TIC 261136679").
+    Devuelve un float, o None si no se encuentra (sin internet, nombre que no se
+    resuelve, estrella sin radio en el catálogo). Nunca lanza excepción.
+    """
+    try:
+        name = str(star_name).strip()
+        match = re.fullmatch(r"(?i)TIC[\s_-]*(\d+)", name)
+        if match:
+            tabla = Catalogs.query_criteria(catalog="Tic", ID=int(match.group(1)))
+        else:
+            tabla = Catalogs.query_object(name, radius=search_radius_deg,
+                                          catalog="TIC")
+        if tabla is None or len(tabla) == 0:
+            return None
+
+        # Si hay varias estrellas en el campo, la más cercana es la buscada
+        if "dstArcSec" in tabla.colnames:
+            tabla.sort("dstArcSec")
+
+        radio = tabla["rad"][0]
+        if np.ma.is_masked(radio):
+            return None
+        radio = float(radio)
+        return radio if np.isfinite(radio) and radio > 0 else None
+    except Exception:
+        return None
+
+
 def depth_from_folded(folded, duration_days):
     """
     Profundidad independiente: mediana fuera del tránsito menos mediana en el 60%
@@ -188,15 +216,15 @@ def bin_average(x, y, width, min_points=3):
             ye.append(y[sel].std() / np.sqrt(sel.sum()))
     return np.array(xc), np.array(yc), np.array(ye)
 
-
-# ---------------------------------------------------------------------------
 # 4. FUNCIÓN PRINCIPAL
-# ---------------------------------------------------------------------------
 def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
-                    bin_minutes=None, max_period=None, callback=None):
+                    bin_minutes=None, max_period=None, auto_radius=True, callback=None):
     """
     Descarga y analiza cualquier estrella de Kepler o TESS.
     Devuelve (results_df, plot_data); ver la descripción al inicio del archivo.
+
+    Radio estelar: si `stellar_radius` (radios solares) se pasa, se usa ese valor.
+    Si no, y `auto_radius=True`, se busca automáticamente en el catálogo TIC.
     """
     if callback:
         callback("Argument validation...")
@@ -210,6 +238,15 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
 
     if callback:
         callback("Searching and downloading...")
+    # 0. Radio estelar: el del usuario, o el del catálogo TIC
+    if stellar_radius is not None:
+        radius_source = "usuario"
+    elif auto_radius:
+        stellar_radius = get_stellar_radius(star_name)
+        radius_source = "catálogo TIC" if stellar_radius else "no encontrado"
+    else:
+        radius_source = "no proporcionado"
+
     # 1. Descarga (si mission=None prueba Kepler y luego TESS)
     raw_lc, used_mission = None, None
     for candidate in ([mission] if mission else ["Kepler", "TESS"]):
@@ -283,10 +320,12 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
         "snr": params["snr"],
         "n_transits": params["n_transits"],
         "odd_even_ratio": odd_even,
+        "stellar_radius_rsun": stellar_radius if stellar_radius else np.nan,
+        "radius_source": radius_source,
         **radius,
     }])
 
-    #7. VARIABLES para las gráficas
+    # 7. VARIABLES para las gráficas
     t_binned = _arr(binned_lc.time.value)
     n_start = int(np.floor((t_binned.min() - params["t0"]) / params["period"]))
     n_end = int(np.ceil((t_binned.max() - params["t0"]) / params["period"]))
@@ -299,7 +338,7 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     window_hours = max(3 * params["duration_h"], 3.0)
     in_window = np.abs(phase_hours) < window_hours
     bx, by, be = bin_average(phase_hours[in_window], folded_flux[in_window],
-                             max(params["duration_h"] / 12, 0.05))
+                           max(params["duration_h"] / 12, 0.05))
     periods = _arr(bls.period.value)
 
     plot_data = {
@@ -320,6 +359,8 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
         # Parámetros del tránsito (títulos y bandas)
         "t0": params["t0"], "duration_h": params["duration_h"],
         "depth_ppm": params["depth_bls"] * 1e6,
+        # Radio estelar usado (para dibujar planeta vs. estrella en la interfaz)
+        "stellar_radius": stellar_radius, "radius_source": radius_source,
     }
     if callback:
         callback("Success")
