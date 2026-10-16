@@ -1,13 +1,14 @@
 import sys
 import pandas as pd
 import matplotlib.pyplot as plt
+import os
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QLineEdit, QCompleter, QListWidget, QComboBox, QPushButton, QTextEdit, QSplitter,
-    QAbstractItemView, QCheckBox, QTableWidget, QTableWidgetItem, QButtonGroup
+    QAbstractItemView, QCheckBox, QTableWidget, QTableWidgetItem, QButtonGroup, QFileDialog
 )
 
 from analisys import search_star, get_stardata
@@ -140,6 +141,22 @@ class MainWindow(QMainWindow):
 
         #Export Analisys
         self.export_btn = QPushButton("Export")
+        self.export_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #d8831c; 
+                color: white; 
+                font-weight: bold; 
+                padding: 6px;
+                border-radius: 4px;
+            }
+            QPushButton:disabled {
+                background-color: #d3d3d3; 
+                color: #7f7f7f;
+            }
+        """)
+        self.export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self.export_results)
         right_layout.addWidget(self.export_btn)
         #-----------------------------------------
 
@@ -162,6 +179,7 @@ class MainWindow(QMainWindow):
             return
 
         self.search_btn.setEnabled(False)
+        self.export_btn.setEnabled(False)
         self.logs_text.clear()
 
         def get_callback(message):
@@ -179,6 +197,7 @@ class MainWindow(QMainWindow):
             self.load_analisys_results(results)
             self.select_graphics(1)
             self.search_btn.setEnabled(True)
+            self.export_btn.setEnabled(True)
         except Exception as e:
             self.logs_text.append(f"Search error: {str(e)}")
             self.search_btn.setEnabled(True)
@@ -272,6 +291,12 @@ class MainWindow(QMainWindow):
             ax.axvline(x=best_period, color='red', linestyle=':', label=f"Best Period: {best_period:.4f} d")
             ax.plot(best_period, best_power, 'ro', markersize=6)
 
+        ax.set_title("Periodogram", fontsize=10, fontweight='bold')
+        ax.set_xlabel("Periodo (Days)", fontsize=9)
+        ax.set_ylabel("BLS", fontsize=9)
+        ax.grid(True, linestyle='--', alpha=0.5)
+        ax.legend(loc='upper right', fontsize=8)
+
     def show_zoom(self, ax, data):
         phase_h = data.get("phase_hours", [])
         folded_f = data.get("folded_flux", [])
@@ -304,6 +329,59 @@ class MainWindow(QMainWindow):
         ax.set_ylabel("Normalized Flux", fontsize=9)
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.legend(loc='lower right', fontsize=8)
+
+
+    def export_results(self):
+        self.export_btn.setEnabled(False)
+        if self.current_df is None or self.current_plot_dict is None:
+            self.logs_text.append("No data to export")
+            return
+
+        base_root = QFileDialog.getExistingDirectory(self, "Select path")
+        if not base_root:
+            return 
+
+        try:
+            target_name = self.star_input.text().strip().replace(" ", "_")
+            folder_name = f"Results_{target_name}"
+            folder_path = os.path.join(base_root, folder_name)
+
+            os.makedirs(folder_path, exist_ok=True)
+
+            txt_path = os.path.join(folder_path, "results.txt")
+            row = self.current_df.iloc[0]
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(f"=== ANALYSIS RESULTS: {self.star_input.text().strip()} ===\n\n")
+                for col_name in self.current_df.columns:
+                    val = row[col_name]
+                    f.write(f"• {col_name}: {val}\n")
+
+            from matplotlib.figure import Figure
+
+            graph_names = [
+                ("01_raw_lightcurve.png", self.show_raw_lightcurve),
+                ("02_lightcurve.png", self.show_lightcurve),
+                ("03_periodogram_BLS.png", self.show_periodograma_BLS),
+                ("04_zoom.png", self.show_zoom)
+            ]
+
+            for file_name, plt_func in graph_names:
+                fig_temp = Figure(figsize=(8, 6), dpi=150)
+                ax_temp = fig_temp.add_subplot(111)
+
+                plt_func(ax_temp, self.current_plot_dict)
+
+                path_img = os.path.join(folder_path, file_name)
+                fig_temp.savefig(path_img, bbox_inches='tight')
+
+            self.logs_text.append(f"Exported correctly:\n   {folder_path}\n")
+            
+            self.export_btn.setEnabled(True)
+
+        except Exception as e:
+            self.logs_text.append(f"Failed to export: {str(e)}\n")
+            self.export_btn.setEnabled(True)
+
     
 
 if __name__ == "__main__":
