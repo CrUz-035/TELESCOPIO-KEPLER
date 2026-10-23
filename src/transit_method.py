@@ -7,33 +7,62 @@ import pandas as pd
 from astroquery.mast import Catalogs
 
 
-# Silencia avisos informativos de lightkurve para no ensuciar la consola
+
 warnings.filterwarnings("ignore", category=lk.LightkurveWarning)
 
-# Conversión de radios solares a radios terrestres y de Júpiter
 R_SUN_TO_R_EARTH = 109.076
 R_SUN_TO_R_JUPITER = 9.731
 
+TIME_SYSTEM = {"Kepler": ("BKJD", "BJD - 2454833"),
+               "TESS":   ("BTJD", "BJD - 2457000")}
+
+N_SIG_ERR = 1
+
+FIGURE_STYLE = {"figsize": (8, 4.5), "dpi": 150, "fontsize": 11,
+                "color_raw": "0.6", "color_binned": "tab:blue",
+                "color_line": "tab:red", "color_transit": "tab:orange"}
+
 
 def _arr(x):
-    """Convierte Quantity / arreglo enmascarado a ndarray de floats."""
     return np.asarray(getattr(x, "value", x), dtype=float)
 
 def _val(x):
-    """Convierte un Quantity/escalar de astropy a float simple."""
     return float(getattr(x, "value", x))
 
-# ---------------------------------------------------------------------------
-# 1. DESCARGA Y LIMPIEZA
+def round_to_error(value, error, n_sig=2):
+    if not (np.isfinite(value) and np.isfinite(error)) or error <= 0:
+        return value, error
+    decimals = n_sig - 1 - int(np.floor(np.log10(error)))
+    return round(value, decimals), round(error, decimals)
+
+def _round_sig(x, n):
+    if not np.isfinite(x) or x == 0:
+        return x
+    return round(x, n - 1 - int(np.floor(np.log10(abs(x)))))
+
+def _pair(value, error, n_sig=None, fallback_sig=4):
+    n_sig = N_SIG_ERR if n_sig is None else n_sig
+    if np.isfinite(value) and np.isfinite(error) and error > 0:
+        return round_to_error(value, error, n_sig)
+    return _round_sig(value, fallback_sig), np.nan
+
+def _fmt_pair(value, error):
+    if np.isfinite(error) and error > 0:
+        dec = max(0, N_SIG_ERR - 1 - int(np.floor(np.log10(error))))
+        return f"{value:.{dec}f} ± {error:.{dec}f}"
+    return str(float(value))
+
+def _grid_step(periods, period):
+    p = np.sort(_arr(periods))
+    i = int(np.argmin(np.abs(p - period)))
+    j = min(i + 1, len(p) - 1)
+    return float(abs(p[j] - p[i])) if j != i else float(abs(p[i] - p[i - 1]))
+
 def download_light_curve(star_name, mission, max_obs=None):
-    """
-    Descarga TODOS los trimestres/sectores de la misión y los une (stitch).
-    Lanza RuntimeError si no hay datos.
-    """
     if mission == "Kepler":
         search = lk.search_lightcurve(star_name, mission="Kepler",
                                       author="Kepler", cadence="long")
-    else:  # TESS
+    else:
         search = lk.search_lightcurve(star_name, mission="TESS",
                                       author="SPOC", exptime=120)
     if len(search) == 0:
@@ -43,45 +72,30 @@ def download_light_curve(star_name, mission, max_obs=None):
     return search.download_all(flux_column="pdcsap_flux").stitch()
 
 def clip_upper_outliers(light_curve, sigma_upper=4.0):
-    """
-    Recorta solo outliers hacia ARRIBA (flares, rayos cósmicos). Un recorte
-    simétrico borraría los puntos más profundos del tránsito.
-    """
     return light_curve.remove_outliers(sigma_upper=sigma_upper, sigma_lower=float("inf"))
 
 
 def flatten_light_curve(light_curve, max_duration, mask=None):
-    """
-    Quita tendencias lentas (Savitzky-Golay). La ventana debe ser >= 3x la duración
-    máxima del tránsito, o el filtro borraría el tránsito.
-    `mask` (True = tránsito) excluye los tránsitos del ajuste de la tendencia.
-    """
     dt = np.nanmedian(np.diff(_arr(light_curve.time.value)))
     window = int(max(0.5, 3 * max_duration) / dt)
-    window = window if window % 2 == 1 else window + 1      # debe ser impar
+    window = window if window % 2 == 1 else window + 1
     return light_curve.flatten(window_length=window, polyorder=2,
                                break_tolerance=10, mask=mask)
 
 
 def bin_light_curve(light_curve, minutes):
-    """Promedia en bins de tiempo (reduce ruido y acelera BLS)."""
     binned = light_curve.bin(time_bin_size=minutes  * u.min).remove_nans()
     ok = np.isfinite(_arr(binned.flux)) & np.isfinite(_arr(binned.flux_err))
     return binned[ok]
 
-# 2. BOX LEAST SQUARES
 def get_bls_ranges(total_time, max_period_user=None, min_duration=0.0):
-    """
-    Rango de períodos y duraciones (en días) según la cobertura temporal.
-    Se necesitan >= 2-3 tránsitos para confirmar un período -> P_max <= T/2 (o T/3).
-    """
-    if total_time <= 30:            # TESS, 1 sector (~27 d)
+    if total_time <= 30:
         p_min, p_max = 0.3, min(12.0, total_time / 2)
         durations = np.linspace(0.02, 0.20, 12)
-    elif total_time <= 120:         # Kepler 1 trimestre o pocos sectores TESS
+    elif total_time <= 120:
         p_min, p_max = 0.5, min(40.0, total_time / 2)
         durations = np.linspace(0.03, 0.25, 12)
-    else:                           # Kepler misión completa / muchos sectores
+    else:
         p_min, p_max = 0.5, min(400.0, total_time / 3)
         durations = np.linspace(0.03, 0.40, 15)
 
@@ -94,19 +108,16 @@ def get_bls_ranges(total_time, max_period_user=None, min_duration=0.0):
 
 
 def run_bls(light_curve, max_period_user=None, min_duration=0.0, max_points=80000):
-    """BLS global: malla logarítmica de períodos (limitada a max_points por costo)."""
     total_time = _val(light_curve.time.max()) - _val(light_curve.time.min())
     p_min, p_max, durations = get_bls_ranges(total_time, max_period_user, min_duration)
-    step = durations.min() / (2 * total_time)       # deriva de fase < duración/2
+    step = durations.min() / (2 * total_time)
     n = min(int(np.log(p_max / p_min) / step) + 1, max_points)
     periods = np.geomspace(p_min, p_max, n)
-    # frequency_factor alto: solo silencia un aviso; se usa nuestra malla `periods`
     return light_curve.to_periodogram(method="bls", period=periods,
                                       duration=durations, frequency_factor=1e6)
 
 
 def refine_bls(light_curve, params, width=0.01, n_points=4000):
-    """BLS fino (+-1%) alrededor del pico para obtener un período más preciso."""
     period, duration = params["period"], params["duration_h"] / 24
     periods = np.linspace(period * (1 - width), period * (1 + width), n_points)
     durations = np.unique(np.clip(np.linspace(0.6 * duration, 1.6 * duration, 12),
@@ -116,17 +127,15 @@ def refine_bls(light_curve, params, width=0.01, n_points=4000):
 
 
 def extract_bls_parameters(bls):
-    """Extrae período, t0, duración, profundidad, SNR y prueba impar/par del pico BLS."""
     params = {
-        "period": _val(bls.period_at_max_power),                     # días
-        "t0": _val(bls.transit_time_at_max_power),                   # BKJD / BTJD
-        "duration_h": _val(bls.duration_at_max_power) * 24,    # horas
-        "depth_bls": _val(bls.depth_at_max_power),                   # fracción de flujo
+        "period": _val(bls.period_at_max_power),
+        "t0": _val(bls.transit_time_at_max_power),
+        "duration_h": _val(bls.duration_at_max_power) * 24,
+        "depth_bls": _val(bls.depth_at_max_power),
         "snr": float(_arr(bls.snr)[np.nanargmax(_arr(bls.power))]),
         "power": _val(bls.max_power),
         "odd_depth": np.nan, "even_depth": np.nan, "n_transits": np.nan,
     }
-    # Prueba impar/par: si difieren mucho, podría ser una binaria eclipsante
     try:
         stats = bls.compute_stats(period=bls.period_at_max_power,
                                   duration=bls.duration_at_max_power,
@@ -134,21 +143,67 @@ def extract_bls_parameters(bls):
         params["odd_depth"] = _val(stats["depth_odd"][0])
         params["even_depth"] = _val(stats["depth_even"][0])
         params["n_transits"] = int(np.sum(np.asarray(stats["per_transit_count"]) > 0))
-    except Exception:  # puede fallar si hay muy pocos tránsitos
+    except Exception:
         pass
     return params
 
-# 3. PROFUNDIDAD, RADIO Y UTILIDADES DE GRÁFICAS
-def get_stellar_radius(star_name, search_radius_deg=0.01):
-    """
-    Busca el radio de la estrella (en radios solares) en el catálogo TIC de MAST.
-    El TIC también incluye las estrellas del campo de Kepler, así que sirve
-    para las dos misiones.
+def fit_ephemeris(light_curve, params, n_chunks=8, n_grid=201, bin_days=0.0):
+    nan = {"period_fit": np.nan, "period_err": np.nan,
+           "t0_fit": np.nan, "t0_err": np.nan, "n_chunks_used": 0}
+    t, f = _arr(light_curve.time.value), _arr(light_curve.flux)
+    ok = np.isfinite(t) & np.isfinite(f)
+    t, f = t[ok], f[ok]
+    P, t0, dur = params["period"], params["t0"], params["duration_h"] / 24
+    shifts = np.linspace(-dur, dur, n_grid)
+    step = shifts[1] - shifts[0]
 
-    star_name puede ser un nombre ("Kepler-10", "WASP-18") o un ID ("TIC 261136679").
-    Devuelve un float, o None si no se encuentra (sin internet, nombre que no se
-    resuelve, estrella sin radio en el catálogo). Nunca lanza excepción.
-    """
+    ns, dts, sigs = [], [], []
+    for idx in np.array_split(np.arange(len(t)), n_chunks):
+        if len(idx) < 20:
+            continue
+        tc, fc = t[idx], f[idx]
+        phase0 = ((tc - t0 + 0.5 * P) % P) - 0.5 * P
+        out0 = np.abs(phase0) > dur
+        if out0.sum() < 10:
+            continue
+        sigma = 1.4826 * np.nanmedian(np.abs(fc[out0] - np.nanmedian(fc[out0])))
+        if not np.isfinite(sigma) or sigma <= 0:
+            continue
+        chi2 = np.full(n_grid, np.inf)
+        for k, s in enumerate(shifts):
+            ph = ((tc - (t0 + s) + 0.5 * P) % P) - 0.5 * P
+            inn = np.abs(ph) < dur / 2
+            if inn.sum() < 3 or (~inn).sum() < 3:
+                continue
+            ssr = (np.sum((fc[inn] - fc[inn].mean()) ** 2)
+                   + np.sum((fc[~inn] - fc[~inn].mean()) ** 2))
+            chi2[k] = ssr / sigma ** 2
+        kmin = int(np.argmin(chi2))
+        if not np.isfinite(chi2[kmin]) or kmin in (0, n_grid - 1):
+            continue
+        good = np.where(chi2 <= chi2[kmin] + 1.0)[0]
+        ns.append((np.mean(tc) - t0) / P)
+        dts.append(float(np.mean(shifts[good])))
+        sigs.append(max((shifts[good.max()] - shifts[good.min()]) / 2,
+                        step / np.sqrt(12)))
+    if len(ns) < 3:
+        return nan
+
+    ns, dts, sigs = np.array(ns), np.array(dts), np.array(sigs)
+    W = 1.0 / sigs ** 2
+    S, Sx, Sy = W.sum(), (W * ns).sum(), (W * dts).sum()
+    Sxx, Sxy = (W * ns ** 2).sum(), (W * ns * dts).sum()
+    D = S * Sxx - Sx ** 2
+    b = (S * Sxy - Sx * Sy) / D
+    a = (Sxx * Sy - Sx * Sxy) / D
+    chi2_fit = (W * (dts - a - b * ns) ** 2).sum()
+    scale = max(1.0, chi2_fit / (len(ns) - 2))
+    return {"period_fit": P + b, "period_err": float(np.sqrt(S / D * scale)),
+            "t0_fit": t0 + a,
+            "t0_err": float(np.sqrt(Sxx / D * scale + (bin_days / np.sqrt(12)) ** 2)),
+            "n_chunks_used": int(len(ns))}
+
+def get_stellar_radius(star_name, search_radius_deg=0.01):
     try:
         name = str(star_name).strip()
         match = re.fullmatch(r"(?i)TIC[\s_-]*(\d+)", name)
@@ -160,7 +215,6 @@ def get_stellar_radius(star_name, search_radius_deg=0.01):
         if tabla is None or len(tabla) == 0:
             return None
 
-        # Si hay varias estrellas en el campo, la más cercana es la buscada
         if "dstArcSec" in tabla.colnames:
             tabla.sort("dstArcSec")
 
@@ -174,10 +228,6 @@ def get_stellar_radius(star_name, search_radius_deg=0.01):
 
 
 def depth_from_folded(folded, duration_days):
-    """
-    Profundidad independiente: mediana fuera del tránsito menos mediana en el 60%
-    central del tránsito. Devuelve (profundidad, error).
-    """
     phase, flux = _arr(folded.time.value), _arr(folded.flux)
     inside = np.abs(phase) < 0.3 * duration_days
     outside = np.abs(phase) > 1.0 * duration_days
@@ -189,22 +239,20 @@ def depth_from_folded(folded, duration_days):
 
 
 def estimate_planet_radius(depth, depth_error, stellar_radius=None):
-    """
-    Rp/R* = sqrt(profundidad). Estimación de primer orden: ignora el oscurecimiento
-    al limbo y el parámetro de impacto.
-    """
     k = float(np.sqrt(max(depth, 0.0)))
     out = {"rp_rstar": k,
            "rp_rstar_err": depth_error / (2 * k) if k > 0 else np.nan,
-           "rp_earth": np.nan, "rp_jupiter": np.nan}
+           "rp_earth": np.nan, "rp_earth_err": np.nan,
+           "rp_jupiter": np.nan, "rp_jupiter_err": np.nan}
     if stellar_radius:
         out["rp_earth"] = k * stellar_radius * R_SUN_TO_R_EARTH
         out["rp_jupiter"] = k * stellar_radius * R_SUN_TO_R_JUPITER
+        out["rp_earth_err"] = out["rp_rstar_err"] * stellar_radius * R_SUN_TO_R_EARTH
+        out["rp_jupiter_err"] = out["rp_rstar_err"] * stellar_radius * R_SUN_TO_R_JUPITER
     return out
 
 
 def bin_average(x, y, width, min_points=3):
-    """Promedio de y en bins de x (para ver la forma del tránsito plegado)."""
     edges = np.arange(x.min(), x.max() + width, width)
     idx = np.digitize(x, edges)
     xc, yc, ye = [], [], []
@@ -216,19 +264,10 @@ def bin_average(x, y, width, min_points=3):
             ye.append(y[sel].std() / np.sqrt(sel.sum()))
     return np.array(xc), np.array(yc), np.array(ye)
 
-# 4. FUNCIÓN PRINCIPAL
 def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
                     bin_minutes=None, max_period=None, auto_radius=True, callback=None):
-    """
-    Descarga y analiza cualquier estrella de Kepler o TESS.
-    Devuelve (results_df, plot_data); ver la descripción al inicio del archivo.
-
-    Radio estelar: si `stellar_radius` (radios solares) se pasa, se usa ese valor.
-    Si no, y `auto_radius=True`, se busca automáticamente en el catálogo TIC.
-    """
     if callback:
         callback("Argument validation...")
-    # Validación de argumentos
     if not star_name or not str(star_name).strip():
         raise ValueError("star_name no puede estar vacío")
     if mission not in (None, "Kepler", "TESS"):
@@ -238,7 +277,6 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
 
     if callback:
         callback("Searching and downloading...")
-    # 0. Radio estelar: el del usuario, o el del catálogo TIC
     if stellar_radius is not None:
         radius_source = "usuario"
     elif auto_radius:
@@ -247,7 +285,6 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     else:
         radius_source = "no proporcionado"
 
-    # 1. Descarga (si mission=None prueba Kepler y luego TESS)
     raw_lc, used_mission = None, None
     for candidate in ([mission] if mission else ["Kepler", "TESS"]):
         try:
@@ -262,40 +299,43 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
 
     if callback:
         callback("Cleaning...")
-    # 2. Limpieza y parámetros de la búsqueda
     clean_lc = raw_lc.remove_nans().normalize()
     total_time = _val(clean_lc.time.max()) - _val(clean_lc.time.min())
-    cadence_min = np.nanmedian(np.diff(_arr(clean_lc.time.value))) * 24 * 60
-    if bin_minutes is None:   # ~1 h si la cadencia es larga (Kepler), 10 min si es corta
+    cadence_min = float(np.nanmedian(np.diff(_arr(clean_lc.time.value))) * 24 * 60)
+    noise_ppm = float(np.nanmedian(_arr(clean_lc.flux_err))) * 1e6
+    if bin_minutes is None:
         bin_minutes = round(2 * cadence_min) if cadence_min >= 20 else 10
     min_duration = bin_minutes / 1440
     max_duration = float(get_bls_ranges(total_time, max_period, min_duration)[2].max())
 
     if callback:
         callback("First step: searching for transits...")
-    # 3. Pasada 1: localizar los tránsitos (aplanado sin máscara) 
     flat_lc = clip_upper_outliers(flatten_light_curve(clean_lc, max_duration))
     binned_lc = bin_light_curve(flat_lc, bin_minutes)
     preliminary = extract_bls_parameters(
         run_bls(binned_lc, max_period, min_duration, max_points=40000))
-    
+
     if callback:
         callback("Second step: flatten, global BLS and refining...")
-    # 4. Pasada 2: aplanar protegiendo los tránsitos, BLS global + refinado 
     mask = clean_lc.create_transit_mask(period=preliminary["period"],
                                         transit_time=preliminary["t0"],
                                         duration=2.0 * preliminary["duration_h"] / 24)
     flat_lc = clip_upper_outliers(flatten_light_curve(clean_lc, max_duration, mask=mask))
     binned_lc = bin_light_curve(flat_lc, bin_minutes)
-    bls = run_bls(binned_lc, max_period, min_duration)      # para el periodograma
+    bls = run_bls(binned_lc, max_period, min_duration)
     params = extract_bls_parameters(bls)
-    fine = extract_bls_parameters(refine_bls(binned_lc, params))
+    fine_bls = refine_bls(binned_lc, params)
+    fine = extract_bls_parameters(fine_bls)
     if fine["power"] >= 0.9 * params["power"]:
         params = fine
+        period_step = _grid_step(fine_bls.period, params["period"])
+    else:
+        period_step = _grid_step(bls.period, params["period"])
+
+    ephem = fit_ephemeris(binned_lc, params, bin_days=bin_minutes / 1440)
 
     if callback:
         callback("Folding, depth and radius...")
-    # 5. Plegado, profundidad y radio
     folded = flat_lc.fold(period=params["period"], epoch_time=params["t0"])
     folded_depth, folded_err = depth_from_folded(folded, params["duration_h"] / 24)
     use_folded = np.isfinite(folded_depth) and folded_depth > 0
@@ -305,27 +345,41 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     odd_even = (params["odd_depth"] / params["even_depth"]
                 if np.isfinite(params["even_depth"]) and params["even_depth"] > 0
                 else np.nan)
-    
+
     if callback:
         callback("Exporting results...")
-    # 6. TABLA de resultados
+    time_name, time_def = TIME_SYSTEM[used_mission]
+
+    period_value = ephem["period_fit"] if np.isfinite(ephem["period_fit"]) \
+        else params["period"]
+    period_r, period_err_r = _pair(period_value, ephem["period_err"])
+    depth_f_r, depth_f_err_r = _pair(folded_depth * 1e6, folded_err * 1e6)
+    rp_k_r, _ = _pair(radius["rp_rstar"], radius["rp_rstar_err"])
+    rp_e_r, rp_e_err_r = _pair(radius["rp_earth"], radius["rp_earth_err"])
+    rp_j_r, rp_j_err_r = _pair(radius["rp_jupiter"], radius["rp_jupiter_err"])
+
     results_df = pd.DataFrame([{
         "star": star_name,
         "mission": used_mission,
-        "period_d": params["period"],
-        "t0": params["t0"],
-        "duration_h": params["duration_h"],
-        "depth_bls_ppm": params["depth_bls"] * 1e6,
-        "depth_folded_ppm": folded_depth * 1e6,
-        "snr": params["snr"],
+        "cadence_min": float(round(cadence_min, 1)),
+        "noise_ppm": _round_sig(noise_ppm, 3),
+        "period_d": period_r,
+        "period_err_d": period_err_r,
+        "duration_h": _round_sig(params["duration_h"], 2),
+        "depth_folded_ppm": depth_f_r,
+        "depth_folded_err_ppm": depth_f_err_r,
+        "depth_bls_ppm": _round_sig(params["depth_bls"] * 1e6, 3),
+        "snr": int(round(params["snr"])) if np.isfinite(params["snr"]) else np.nan,
         "n_transits": params["n_transits"],
-        "odd_even_ratio": odd_even,
-        "stellar_radius_rsun": stellar_radius if stellar_radius else np.nan,
-        "radius_source": radius_source,
-        **radius,
+        "odd_even_ratio": round(odd_even, 2) if np.isfinite(odd_even) else np.nan,
+        "stellar_radius_rsun": round(stellar_radius, 3) if stellar_radius else np.nan,
+        "rp_rstar": rp_k_r,
+        "rp_earth": rp_e_r,
+        "rp_earth_err": rp_e_err_r,
+        "rp_jupiter": rp_j_r,
+        "rp_jupiter_err": rp_j_err_r,
     }])
 
-    # 7. VARIABLES para las gráficas
     t_binned = _arr(binned_lc.time.value)
     n_start = int(np.floor((t_binned.min() - params["t0"]) / params["period"]))
     n_end = int(np.ceil((t_binned.max() - params["t0"]) / params["period"]))
@@ -337,30 +391,73 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     folded_flux = _arr(folded.flux)
     window_hours = max(3 * params["duration_h"], 3.0)
     in_window = np.abs(phase_hours) < window_hours
-    bx, by, be = bin_average(phase_hours[in_window], folded_flux[in_window],
-                           max(params["duration_h"] / 12, 0.05))
+    phase_bin_h = max(params["duration_h"] / 12, 0.05)
+    bx, by, be = bin_average(phase_hours[in_window], folded_flux[in_window], phase_bin_h)
     periods = _arr(bls.period.value)
+
+    cad = f"{cadence_min:.1f}".rstrip("0").rstrip(".")
+    p_txt = _fmt_pair(period_r, period_err_r) + " d"
+    head = f"{star_name} ({used_mission}), cadencia {cad} min"
+    xt = f"Tiempo ({time_name} = {time_def}, días)"
+    yt = "Flujo normalizado (adimensional)"
+    figures = {
+        "raw": {
+            "title": head, "xlabel": xt, "ylabel": yt,
+            "legend": {"raw": f"Cadencia original ({cad} min)"},
+        },
+        "clean": {
+            "title": f"{head}, bins de {bin_minutes} min", "xlabel": xt, "ylabel": yt,
+            "legend": {"raw": f"Cadencia original ({cad} min)",
+                       "binned": f"Promedios de {bin_minutes} min",
+                       "transits": "Tránsitos predichos"},
+        },
+        "periodogram": {
+            "title": f"Periodograma BLS de {star_name} ({used_mission})",
+            "xlabel": "Periodo (días)", "ylabel": "Potencia BLS (adimensional)",
+            "legend": {"peak": f"P = {p_txt}"},
+        },
+        "folded": {
+            "title": f"{head}, plegada a P = {p_txt}",
+            "xlabel": "Tiempo desde el centro del tránsito (horas)", "ylabel": yt,
+            "legend": {"raw": f"Datos ({cad} min)",
+                       "binned": f"Promedios en fase ({phase_bin_h * 60:.0f} min)"},
+        },
+    }
 
     plot_data = {
         "star_name": star_name,
-        # Gráfica 0: curva sin aplanar
+        "mission": used_mission,
         "time_raw": _arr(clean_lc.time.value), "flux_raw": _arr(clean_lc.flux),
-        # Gráfica 1: curva completa limpia + binned + tránsitos predichos
         "time_clean": _arr(flat_lc.time.value), "flux_clean": _arr(flat_lc.flux),
         "time_binned": t_binned, "flux_binned": _arr(binned_lc.flux),
         "transit_times": transit_times,
-        # Gráfica 2: periodograma
         "periods": periods, "power": _arr(bls.power),
         "best_period": params["period"], "best_power": params["power"],
-        # Gráfica 3: curva plegada (zoom al tránsito)
         "phase_hours": phase_hours, "folded_flux": folded_flux,
         "binned_phase_hours": bx, "binned_folded_flux": by, "binned_folded_err": be,
         "window_hours": window_hours,
-        # Parámetros del tránsito (títulos y bandas)
         "t0": params["t0"], "duration_h": params["duration_h"],
         "depth_ppm": params["depth_bls"] * 1e6,
-        # Radio estelar usado (para dibujar planeta vs. estrella en la interfaz)
         "stellar_radius": stellar_radius, "radius_source": radius_source,
+        "figures": figures,
+        "style": FIGURE_STYLE,
+        "labels": {"time": xt, "flux": yt, "period": "Periodo (días)",
+                   "power": "Potencia BLS (adimensional)",
+                   "phase": "Tiempo desde el centro del tránsito (horas)"},
+        "time_system": time_name,
+        "cadence_min": float(round(cadence_min, 1)),
+        "bin_minutes": bin_minutes,
+        "phase_bin_min": round(phase_bin_h * 60),
+        "noise_ppm": noise_ppm,
+        #esto no va en la interfaz
+        "extra": {
+            "period_bls_d": params["period"],
+            "period_step_d": period_step,
+            "t0_fit": ephem["t0_fit"], "t0_err": ephem["t0_err"],
+            "n_chunks_used": ephem["n_chunks_used"],
+            "rp_rstar_err": radius["rp_rstar_err"],
+            "radius_source": radius_source,
+        },
     }
     if callback:
         callback("Success")
