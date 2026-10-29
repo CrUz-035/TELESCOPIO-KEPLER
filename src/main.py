@@ -16,6 +16,7 @@ from transit_method import analyze_transit
 
 class MainWindow(QMainWindow):
     def __init__(self):
+        
         super().__init__()
         #Title and window size
         self.setWindowTitle("Exoplanet Detector")
@@ -135,8 +136,8 @@ class MainWindow(QMainWindow):
 
         self.graph0_btn.setChecked(True)
 
-        self.figura = Figure(figsize=(6, 4), dpi=100)
-        self.canvas = FigureCanvas(self.figura)
+        self.figure = Figure(figsize=(6, 4), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
         right_layout.addWidget(self.canvas, stretch=1)
 
         #Export Analisys
@@ -225,23 +226,23 @@ class MainWindow(QMainWindow):
         text_final = "\n".join(text_lines)
         self.results_display.setPlainText(text_final)
 
-    def select_graphics(self, numero):
+    def select_graphics(self, number):
             for i, btn in enumerate(self.graph_btns, start=1):
-                btn.setChecked(i == numero)
+                btn.setChecked(i == number)
     
             if not self.current_plot_dict:
                 return
     
-            self.figura.clear()
-            ax = self.figura.add_subplot(111)
+            self.figure.clear()
+            ax = self.figure.add_subplot(111)
     
-            if numero == 1:
+            if number == 1:
                 self.show_raw_lightcurve(ax, self.current_plot_dict)
-            elif numero == 2:
+            elif number == 2:
                 self.show_lightcurve(ax, self.current_plot_dict)
-            elif numero == 3:
+            elif number == 3:
                 self.show_periodograma_BLS(ax, self.current_plot_dict)
-            elif numero == 4:
+            elif number == 4:
                 self.show_zoom(ax, self.current_plot_dict)
     
             self.canvas.draw()
@@ -251,9 +252,10 @@ class MainWindow(QMainWindow):
         f = data["flux_raw"]
 
         ax.plot(t, f, 'k.', markersize=2, alpha=0.6)
-        ax.set_title("Lightcurve Raw", fontsize=10, fontweight='bold')
-        ax.set_xlabel("Time", fontsize=9)
-        ax.set_ylabel("Flux", fontsize=9)
+        ax.set_title(data["figures"]["raw"]["title"], fontsize=10, fontweight='bold')
+        ax.set_xlabel(data["figures"]["raw"]["xlabel"], fontsize=9)
+        ax.set_ylabel(data["figures"]["raw"]["ylabel"], fontsize=9)
+        ax.legend(data["figures"]["raw"]["legend"])
         ax.grid(True, linestyle='--', alpha=0.5)
 
         self.canvas.draw()
@@ -271,9 +273,10 @@ class MainWindow(QMainWindow):
             ax.plot(t_binned, f_binned, '.', color='blue', markersize=4, label='Binned')
 
 
-        ax.set_title("Lightcurve", fontsize=10, fontweight='bold')
-        ax.set_xlabel("Time (Days)", fontsize=9)
-        ax.set_ylabel("Normalized Flux", fontsize=9)
+        ax.set_title(data["figures"]["clean"]["title"], fontsize=10, fontweight='bold')
+        ax.set_xlabel(data["figures"]["clean"]["xlabel"], fontsize=9)
+        ax.set_ylabel(data["figures"]["clean"]["ylabel"], fontsize=9)
+        ax.legend(data["figures"]["clean"]["legend"])
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.legend(loc='upper right', fontsize=8)
 
@@ -291,9 +294,10 @@ class MainWindow(QMainWindow):
             ax.axvline(x=best_period, color='red', linestyle=':', label=f"Best Period: {best_period:.4f} d")
             ax.plot(best_period, best_power, 'ro', markersize=6)
 
-        ax.set_title("Periodogram", fontsize=10, fontweight='bold')
-        ax.set_xlabel("Periodo (Days)", fontsize=9)
-        ax.set_ylabel("BLS", fontsize=9)
+        ax.set_title(data["figures"]["periodogram"]["title"], fontsize=10, fontweight='bold')
+        ax.set_xlabel(data["figures"]["periodogram"]["xlabel"], fontsize=9)
+        ax.set_ylabel(data["figures"]["periodogram"]["ylabel"], fontsize=9)
+        ax.legend(data["figures"]["periodogram"]["legend"])
         ax.grid(True, linestyle='--', alpha=0.5)
         ax.legend(loc='upper right', fontsize=8)
 
@@ -322,13 +326,11 @@ class MainWindow(QMainWindow):
         if window_h > 0:
             ax.set_xlim(-window_h, window_h)
 
-        titulo = f"Folded Transit (Depth ~ {depth_ppm:.0f} ppm)"
-        ax.set_title(titulo, fontsize=10, fontweight='bold')
-        
-        ax.set_xlabel("Transit hours from center", fontsize=9)
-        ax.set_ylabel("Normalized Flux", fontsize=9)
+        ax.set_title(data["figures"]["folded"]["title"], fontsize=10, fontweight='bold')
+        ax.set_xlabel(data["figures"]["folded"]["xlabel"], fontsize=9)
+        ax.set_ylabel(data["figures"]["folded"]["ylabel"], fontsize=9)
+        ax.legend(data["figures"]["folded"]["legend"])
         ax.grid(True, linestyle='--', alpha=0.5)
-        ax.legend(loc='lower right', fontsize=8)
 
 
     def export_results(self):

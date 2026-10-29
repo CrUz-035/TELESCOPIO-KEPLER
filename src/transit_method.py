@@ -275,8 +275,7 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     if stellar_radius is not None and stellar_radius <= 0:
         raise ValueError("stellar_radius debe ser positivo (radios solares)")
 
-    if callback:
-        callback("Searching and downloading...")
+
     if stellar_radius is not None:
         radius_source = "usuario"
     elif auto_radius:
@@ -285,6 +284,8 @@ def analyze_transit(star_name, mission=None, stellar_radius=None, max_obs=None,
     else:
         radius_source = "no proporcionado"
 
+    if callback:
+        callback("Searching and downloading...")
     raw_lc, used_mission = None, None
     for candidate in ([mission] if mission else ["Kepler", "TESS"]):
         try:
